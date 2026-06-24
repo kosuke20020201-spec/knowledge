@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="豆知識メモ">
+  <rect width="256" height="256" rx="52" fill="#2f5f46"/>
+  <path d="M69 60h90c20 0 36 16 36 36v69c0 20-16 36-36 36H69V60Z" fill="#f7faf4"/>
+  <path d="M88 86h68M88 112h84M88 138h60" stroke="#2f5f46" stroke-width="12" stroke-linecap="round"/>
+  <path d="M68 60c-16 0-29 13-29 29v83c0 16 13 29 29 29h9V60h-9Z" fill="#c47a22"/>
+  <circle cx="181" cy="76" r="33" fill="#2d5d9f"/>
+  <path d="M181 57v38M162 76h38" stroke="#fff" stroke-width="11" stroke-linecap="round"/>
+</svg>
