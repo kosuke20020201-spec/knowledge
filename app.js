@@ -5,16 +5,15 @@ const DELETED_KEY = "knowledge-notes:deleted:v1";
 const DRAWING_WIDTH = 1024;
 const DRAWING_HEIGHT = 640;
 const MAX_IMAGE_SIDE = 1400;
-const SYNC_FILE_DEFAULT = "knowledge-notes.json";
+const AUTO_SYNC_INTERVAL_MS = 30000;
 
 const DEFAULT_SETTINGS = {
   notificationsEnabled: false,
   intervalMinutes: 1440,
   nextNotificationAt: null,
   lastNotificationAt: null,
-  syncToken: "",
-  syncGistId: "",
-  syncFileName: SYNC_FILE_DEFAULT,
+  syncEndpoint: "",
+  autoSyncEnabled: true,
   lastSyncAt: null
 };
 
@@ -25,7 +24,8 @@ const state = {
   formAttachments: [],
   currentQuizId: null,
   timerId: null,
-  syncTimerId: null,
+  syncDebounceId: null,
+  syncIntervalId: null,
   syncBusy: false,
   deferredInstallPrompt: null,
   drawing: {
@@ -60,10 +60,9 @@ const els = {
   interval: document.querySelector("#intervalSelect"),
   testNotification: document.querySelector("#testNotificationButton"),
   notificationStatus: document.querySelector("#notificationStatus"),
-  syncToken: document.querySelector("#syncTokenInput"),
-  syncGist: document.querySelector("#syncGistInput"),
+  syncEndpoint: document.querySelector("#syncEndpointInput"),
+  autoSync: document.querySelector("#autoSyncToggle"),
   syncNow: document.querySelector("#syncNowButton"),
-  createCloud: document.querySelector("#createCloudButton"),
   pullCloud: document.querySelector("#pullCloudButton"),
   pushCloud: document.querySelector("#pushCloudButton"),
   syncStatus: document.querySelector("#syncStatus"),
@@ -217,13 +216,16 @@ function normalizeDeletedNotes(value) {
 }
 
 function normalizeSettings(settings) {
-  return {
+  const normalized = {
     ...DEFAULT_SETTINGS,
     ...(settings && typeof settings === "object" ? settings : {}),
-    syncToken: String(settings?.syncToken || ""),
-    syncGistId: String(settings?.syncGistId || ""),
-    syncFileName: String(settings?.syncFileName || SYNC_FILE_DEFAULT) || SYNC_FILE_DEFAULT
+    syncEndpoint: String(settings?.syncEndpoint || settings?.appsScriptUrl || ""),
+    autoSyncEnabled: settings?.autoSyncEnabled !== false
   };
+  delete normalized.syncToken;
+  delete normalized.syncGistId;
+  delete normalized.syncFileName;
+  return normalized;
 }
 
 function persistNotes(options = {}) {
@@ -918,8 +920,7 @@ async function testNotification() {
 }
 
 function safeSettingsForExport() {
-  const { syncToken, ...settings } = state.settings;
-  return settings;
+  return { ...state.settings };
 }
 
 function buildDataPayload() {
@@ -1016,17 +1017,17 @@ function exportCsv() {
 }
 
 function renderSyncInputs() {
-  els.syncToken.value = state.settings.syncToken || "";
-  els.syncGist.value = state.settings.syncGistId || "";
+  els.syncEndpoint.value = state.settings.syncEndpoint || "";
+  els.autoSync.checked = state.settings.autoSyncEnabled !== false;
   updateSyncStatus();
 }
 
 function readSyncInputs() {
-  state.settings.syncToken = els.syncToken.value.trim();
-  state.settings.syncGistId = els.syncGist.value.trim();
-  state.settings.syncFileName = state.settings.syncFileName || SYNC_FILE_DEFAULT;
+  state.settings.syncEndpoint = els.syncEndpoint.value.trim();
+  state.settings.autoSyncEnabled = els.autoSync.checked;
   persistSettings();
   updateSyncStatus();
+  scheduleAutoSyncLoop();
 }
 
 function updateSyncStatus(message) {
@@ -1034,105 +1035,99 @@ function updateSyncStatus(message) {
     els.syncStatus.textContent = message;
     return;
   }
-  if (!state.settings.syncToken) {
-    els.syncStatus.textContent = "GitHubトークン未設定";
+  if (!state.settings.syncEndpoint) {
+    els.syncStatus.textContent = "同期URL未設定";
     return;
   }
-  if (!state.settings.syncGistId) {
-    els.syncStatus.textContent = "Gist未作成";
-    return;
-  }
+  const mode = state.settings.autoSyncEnabled ? "自動同期中" : "手動同期";
   els.syncStatus.textContent = state.settings.lastSyncAt
-    ? `最終同期: ${formatNextTime(state.settings.lastSyncAt)}`
-    : "同期できます";
+    ? `${mode}: ${formatNextTime(state.settings.lastSyncAt)}`
+    : mode;
 }
 
-function canPushCloud() {
-  return Boolean(state.settings.syncToken && state.settings.syncGistId);
+function hasSyncEndpoint() {
+  return Boolean(state.settings.syncEndpoint);
 }
 
-function githubHeaders(write = false) {
-  const headers = {
-    Accept: "application/vnd.github+json"
-  };
-  if (write) headers["Content-Type"] = "application/json";
-  if (state.settings.syncToken) headers.Authorization = `Bearer ${state.settings.syncToken}`;
-  return headers;
+function syncUrl(action) {
+  const url = new URL(state.settings.syncEndpoint);
+  url.searchParams.set("app", "knowledge-notes");
+  url.searchParams.set("action", action);
+  url.searchParams.set("_", String(Date.now()));
+  return url.toString();
 }
 
-async function createCloudStore() {
-  readSyncInputs();
-  if (!state.settings.syncToken) {
-    showToast("GitHubトークンを入力してください");
-    return;
-  }
-  if (state.syncBusy) return;
-  state.syncBusy = true;
-  updateSyncStatus("作成中...");
-  try {
-    const response = await fetch("https://api.github.com/gists", {
-      method: "POST",
-      headers: githubHeaders(true),
-      body: JSON.stringify({
-        description: "豆知識メモ sync",
-        public: false,
-        files: {
-          [state.settings.syncFileName]: {
-            content: JSON.stringify(buildDataPayload(), null, 2)
-          }
-        }
-      })
-    });
-    if (!response.ok) throw new Error(`GitHub ${response.status}`);
-    const gist = await response.json();
-    state.settings.syncGistId = gist.id;
-    state.settings.lastSyncAt = nowIso();
-    persistSettings();
-    renderSyncInputs();
-    showToast("クラウドを作成しました");
-  } catch {
-    updateSyncStatus("作成できませんでした");
-  } finally {
-    state.syncBusy = false;
-  }
+function normalizeCloudResponse(data) {
+  if (!data || typeof data !== "object") return { notes: [], deletedNotes: {} };
+  return data.payload && typeof data.payload === "object" ? data.payload : data;
 }
 
 async function fetchCloudPayload() {
   readSyncInputs();
-  if (!state.settings.syncGistId) throw new Error("Gist ID is empty");
-  const response = await fetch(`https://api.github.com/gists/${encodeURIComponent(state.settings.syncGistId)}`, {
-    headers: githubHeaders(false)
-  });
-  if (!response.ok) throw new Error(`GitHub ${response.status}`);
-  const gist = await response.json();
-  const file = gist.files?.[state.settings.syncFileName] || Object.values(gist.files || {})[0];
-  if (!file?.content) return { notes: [], deletedNotes: {} };
-  return JSON.parse(file.content);
+  if (!hasSyncEndpoint()) throw new Error("Sync endpoint is empty");
+  try {
+    const response = await fetch(syncUrl("pull"), { method: "GET", cache: "no-store" });
+    if (!response.ok) throw new Error(`Sync ${response.status}`);
+    return normalizeCloudResponse(await response.json());
+  } catch (error) {
+    return fetchCloudPayloadJsonp();
+  }
 }
 
-async function pushCloudPayload() {
-  readSyncInputs();
-  if (!canPushCloud()) throw new Error("Cloud settings are incomplete");
-  const response = await fetch(`https://api.github.com/gists/${encodeURIComponent(state.settings.syncGistId)}`, {
-    method: "PATCH",
-    headers: githubHeaders(true),
-    body: JSON.stringify({
-      files: {
-        [state.settings.syncFileName]: {
-          content: JSON.stringify(buildDataPayload(), null, 2)
-        }
-      }
-    })
+function fetchCloudPayloadJsonp() {
+  return new Promise((resolve, reject) => {
+    const callbackName = `knowledgeNotesSync${Date.now()}${Math.random().toString(16).slice(2)}`;
+    const script = document.createElement("script");
+    const cleanup = () => {
+      script.remove();
+      delete window[callbackName];
+    };
+    window[callbackName] = (data) => {
+      cleanup();
+      resolve(normalizeCloudResponse(data));
+    };
+    script.onerror = () => {
+      cleanup();
+      reject(new Error("JSONP sync failed"));
+    };
+    const url = new URL(syncUrl("pull"));
+    url.searchParams.set("callback", callbackName);
+    script.src = url.toString();
+    document.head.append(script);
   });
-  if (!response.ok) throw new Error(`GitHub ${response.status}`);
-  state.settings.lastSyncAt = nowIso();
-  persistSettings();
+}
+
+async function postCloud(action, payload) {
+  readSyncInputs();
+  if (!hasSyncEndpoint()) throw new Error("Sync endpoint is empty");
+  const body = JSON.stringify({
+    app: "knowledge-notes",
+    action,
+    payload,
+    clientUpdatedAt: nowIso()
+  });
+  try {
+    const response = await fetch(state.settings.syncEndpoint, {
+      method: "POST",
+      body
+    });
+    if (!response.ok) throw new Error(`Sync ${response.status}`);
+    return normalizeCloudResponse(await response.json());
+  } catch (error) {
+    await fetch(state.settings.syncEndpoint, {
+      method: "POST",
+      mode: "no-cors",
+      body
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    return fetchCloudPayloadJsonp();
+  }
 }
 
 async function pullCloud(options = {}) {
   readSyncInputs();
-  if (!state.settings.syncGistId) {
-    if (!options.quiet) showToast("Gist IDを入力してください");
+  if (!hasSyncEndpoint()) {
+    if (!options.quiet) showToast("同期URLを入力してください");
     return 0;
   }
   if (state.syncBusy) return 0;
@@ -1155,15 +1150,17 @@ async function pullCloud(options = {}) {
 
 async function pushCloud(options = {}) {
   readSyncInputs();
-  if (!canPushCloud()) {
-    if (!options.quiet) showToast("GitHubトークンとGist IDを入力してください");
+  if (!hasSyncEndpoint()) {
+    if (!options.quiet) showToast("同期URLを入力してください");
     return;
   }
   if (state.syncBusy) return;
   state.syncBusy = true;
   if (!options.quiet) updateSyncStatus("送信中...");
   try {
-    await pushCloudPayload();
+    await postCloud("push", buildDataPayload());
+    state.settings.lastSyncAt = nowIso();
+    persistSettings();
     updateSyncStatus("送信しました");
   } catch {
     updateSyncStatus("送信できませんでした");
@@ -1174,21 +1171,18 @@ async function pushCloud(options = {}) {
 
 async function syncCloud(options = {}) {
   readSyncInputs();
-  if (!state.settings.syncToken) {
-    if (!options.quiet) showToast("GitHubトークンを入力してください");
-    return;
-  }
-  if (!state.settings.syncGistId) {
-    await createCloudStore();
+  if (!hasSyncEndpoint()) {
+    if (!options.quiet) showToast("同期URLを入力してください");
     return;
   }
   if (state.syncBusy) return;
   state.syncBusy = true;
   if (!options.quiet) updateSyncStatus("同期中...");
   try {
-    const payload = await fetchCloudPayload();
+    const payload = await postCloud("sync", buildDataPayload());
     const changed = mergeRemotePayload(payload);
-    await pushCloudPayload();
+    state.settings.lastSyncAt = nowIso();
+    persistSettings();
     updateSyncStatus(`同期しました: ${changed}件更新`);
   } catch {
     updateSyncStatus("同期できませんでした");
@@ -1198,9 +1192,18 @@ async function syncCloud(options = {}) {
 }
 
 function queueAutoSync() {
-  if (!canPushCloud()) return;
-  clearTimeout(state.syncTimerId);
-  state.syncTimerId = setTimeout(() => syncCloud({ quiet: true }), 1800);
+  if (!hasSyncEndpoint() || !state.settings.autoSyncEnabled) return;
+  clearTimeout(state.syncDebounceId);
+  state.syncDebounceId = setTimeout(() => syncCloud({ quiet: true }), 1800);
+}
+
+function scheduleAutoSyncLoop() {
+  clearInterval(state.syncIntervalId);
+  state.syncIntervalId = null;
+  if (!hasSyncEndpoint() || !state.settings.autoSyncEnabled) return;
+  state.syncIntervalId = setInterval(() => {
+    if (document.visibilityState === "visible") syncCloud({ quiet: true });
+  }, AUTO_SYNC_INTERVAL_MS);
 }
 
 function showToast(message) {
@@ -1239,10 +1242,9 @@ function bindEvents() {
   els.reminderToggle.addEventListener("change", toggleReminder);
   els.interval.addEventListener("change", changeInterval);
   els.testNotification.addEventListener("click", testNotification);
-  els.syncToken.addEventListener("change", readSyncInputs);
-  els.syncGist.addEventListener("change", readSyncInputs);
+  els.syncEndpoint.addEventListener("change", readSyncInputs);
+  els.autoSync.addEventListener("change", readSyncInputs);
   els.syncNow.addEventListener("click", () => syncCloud());
-  els.createCloud.addEventListener("click", createCloudStore);
   els.pullCloud.addEventListener("click", () => pullCloud());
   els.pushCloud.addEventListener("click", () => pushCloud());
   els.drawColor.addEventListener("input", () => {
@@ -1263,6 +1265,9 @@ function bindEvents() {
   els.closeDraw.addEventListener("click", closeDrawingDialog);
   window.addEventListener("resize", () => {
     if (els.drawingDialog.open) redrawDrawingCanvas();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") queueAutoSync();
   });
   els.exportButton.addEventListener("click", (event) => {
     if (event.shiftKey) {
@@ -1301,7 +1306,8 @@ async function init() {
   updateReminderStatus();
   await registerServiceWorker();
   scheduleReminder();
-  if (canPushCloud()) syncCloud({ quiet: true });
+  scheduleAutoSyncLoop();
+  queueAutoSync();
   handleUrlQuiz();
 }
 

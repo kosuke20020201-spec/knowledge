@@ -132,19 +132,16 @@
           </div>
           <div class="sync-grid">
             <label>
-              <span>GitHubトークン</span>
-              <input id="syncTokenInput" type="password" autocomplete="off" placeholder="token">
+              <span>Google Apps Script URL</span>
+              <input id="syncEndpointInput" type="url" autocomplete="off" placeholder="https://script.google.com/macros/s/.../exec">
             </label>
-            <label>
-              <span>Gist ID</span>
-              <input id="syncGistInput" type="text" autocomplete="off" placeholder="未作成なら空欄">
+            <label class="switch sync-switch" title="自動同期">
+              <span>自動同期</span>
+              <input id="autoSyncToggle" type="checkbox" checked>
+              <i aria-hidden="true"></i>
             </label>
           </div>
           <div class="sync-actions">
-            <button class="secondary-button" id="createCloudButton" type="button">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-              新規
-            </button>
             <button class="secondary-button" id="pullCloudButton" type="button">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"/></svg>
               取得

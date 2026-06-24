@@ -365,6 +365,9 @@ select:focus {
 
 .switch input {
   position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: 0;
   opacity: 0;
   pointer-events: none;
 }
@@ -422,8 +425,19 @@ select:focus {
   margin-top: 14px;
 }
 
+.sync-switch {
+  justify-content: space-between;
+  grid-auto-flow: column;
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
 .sync-actions {
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   margin-top: 10px;
 }
 
