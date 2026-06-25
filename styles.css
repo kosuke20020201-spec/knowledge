@@ -715,10 +715,12 @@ select:focus {
   }
 
   .editor-surface {
+    order: 2;
     position: static;
   }
 
   .list-surface {
+    order: 1;
     min-height: 420px;
   }
 }

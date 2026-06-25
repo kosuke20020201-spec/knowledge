@@ -455,7 +455,7 @@ function renderNotes() {
       meta.append(pill);
     });
 
-    card.append(body, head);
+    card.append(head, body);
     if (note.attachments?.length) card.append(createMediaStrip(note.attachments));
     card.append(meta);
     els.list.append(card);
