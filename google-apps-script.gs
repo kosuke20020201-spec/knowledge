@@ -122,7 +122,7 @@ function mergePayloads_(base, incoming) {
   const deletedNotes = Object.assign({}, base.deletedNotes || {});
 
   (base.notes || []).forEach((note) => {
-    if (note && note.id) notes[note.id] = note;
+    if (note && note.id) notes[note.id] = normalizeNote_(note);
   });
 
   Object.keys(incoming.deletedNotes || {}).forEach((id) => {
@@ -133,17 +133,20 @@ function mergePayloads_(base, incoming) {
 
   (incoming.notes || []).forEach((note) => {
     if (!note || !note.id) return;
+    note = normalizeNote_(note);
     const deletedAt = time_(deletedNotes[note.id]);
-    if (deletedAt >= time_(note.updatedAt)) return;
-    if (!notes[note.id] || time_(note.updatedAt) > time_(notes[note.id].updatedAt)) {
+    if (deletedAt >= contentTime_(note)) return;
+    if (!notes[note.id] || contentTime_(note) > contentTime_(notes[note.id])) {
       notes[note.id] = note;
+    } else if (time_(note.lastQuizAt) > time_(notes[note.id].lastQuizAt)) {
+      notes[note.id].lastQuizAt = note.lastQuizAt;
     }
   });
 
   const mergedNotes = Object.keys(notes)
     .map((id) => notes[id])
-    .filter((note) => time_(deletedNotes[note.id]) < time_(note.updatedAt))
-    .sort((a, b) => time_(b.updatedAt) - time_(a.updatedAt));
+    .filter((note) => time_(deletedNotes[note.id]) < contentTime_(note))
+    .sort((a, b) => contentTime_(b) - contentTime_(a));
 
   return {
     app: APP_NAME,
@@ -153,6 +156,28 @@ function mergePayloads_(base, incoming) {
     deletedNotes,
     settings: Object.assign({}, base.settings || {}, incoming.settings || {})
   };
+}
+
+function normalizeNote_(note) {
+  const timestamp = inferContentUpdatedAt_(note);
+  note.updatedAt = timestamp;
+  note.contentUpdatedAt = timestamp;
+  return note;
+}
+
+function inferContentUpdatedAt_(note) {
+  if (note.contentUpdatedAt) return note.contentUpdatedAt;
+  const updatedAt = note.updatedAt || new Date().toISOString();
+  const updatedTime = time_(updatedAt);
+  const quizTime = time_(note.lastQuizAt);
+  if (updatedTime && quizTime && Math.abs(updatedTime - quizTime) < 10000) {
+    return note.createdAt || updatedAt;
+  }
+  return updatedAt;
+}
+
+function contentTime_(note) {
+  return time_(note && (note.contentUpdatedAt || note.updatedAt));
 }
 
 function time_(value) {

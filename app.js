@@ -156,6 +156,36 @@ function truncate(value, length = 260) {
   return value.length > length ? `${value.slice(0, length)}...` : value;
 }
 
+function contentTime(note) {
+  return dateValue(note?.contentUpdatedAt || note?.updatedAt);
+}
+
+function inferContentUpdatedAt(note) {
+  if (note?.contentUpdatedAt) return note.contentUpdatedAt;
+  const updatedAt = note?.updatedAt || nowIso();
+  const updatedTime = dateValue(updatedAt);
+  const quizTime = dateValue(note?.lastQuizAt);
+  if (updatedTime && quizTime && Math.abs(updatedTime - quizTime) < 10000) {
+    return note.createdAt || updatedAt;
+  }
+  return updatedAt;
+}
+
+function latestIso(a, b) {
+  return dateValue(a) >= dateValue(b) ? a || b || null : b || a || null;
+}
+
+function noteFingerprint(note) {
+  return JSON.stringify({
+    title: note.title,
+    body: note.body,
+    source: note.source,
+    tags: note.tags || [],
+    attachments: note.attachments || [],
+    createdAt: note.createdAt
+  });
+}
+
 function escapeForCsv(value) {
   return `"${String(value).replaceAll('"', '""')}"`;
 }
@@ -193,6 +223,7 @@ function normalizeNote(note) {
   const attachments = Array.isArray(note.attachments)
     ? note.attachments.map(normalizeAttachment).filter(Boolean).slice(0, 12)
     : [];
+  const timestamp = inferContentUpdatedAt(note);
   return {
     id: String(note.id || uid()),
     title,
@@ -201,9 +232,47 @@ function normalizeNote(note) {
     tags: Array.isArray(note.tags) ? note.tags.map(String).filter(Boolean) : parseTags(String(note.tags || "")),
     attachments,
     createdAt: note.createdAt || nowIso(),
-    updatedAt: note.updatedAt || nowIso(),
+    updatedAt: timestamp,
+    contentUpdatedAt: timestamp,
     lastQuizAt: note.lastQuizAt || null
   };
+}
+
+function repairDuplicateNoteIds(notes) {
+  const byId = new Map();
+  const repaired = [];
+  let changed = false;
+
+  notes.forEach((note) => {
+    const existing = byId.get(note.id);
+    if (!existing) {
+      byId.set(note.id, note);
+      repaired.push(note);
+      return;
+    }
+
+    if (noteFingerprint(existing) === noteFingerprint(note)) {
+      existing.lastQuizAt = latestIso(existing.lastQuizAt, note.lastQuizAt);
+      if (contentTime(note) > contentTime(existing)) {
+        Object.assign(existing, note, { lastQuizAt: latestIso(existing.lastQuizAt, note.lastQuizAt) });
+      }
+      changed = true;
+      return;
+    }
+
+    const timestamp = nowIso();
+    const clone = {
+      ...note,
+      id: uid(),
+      updatedAt: timestamp,
+      contentUpdatedAt: timestamp
+    };
+    byId.set(clone.id, clone);
+    repaired.push(clone);
+    changed = true;
+  });
+
+  return { notes: repaired, changed };
 }
 
 function normalizeDeletedNotes(value) {
@@ -244,10 +313,13 @@ function persistSettings() {
 
 function loadState() {
   const notes = readJson(STORAGE_KEY, []);
-  state.notes = Array.isArray(notes) ? notes.map(normalizeNote).filter(Boolean) : [];
+  const normalizedNotes = Array.isArray(notes) ? notes.map(normalizeNote).filter(Boolean) : [];
+  const repaired = repairDuplicateNoteIds(normalizedNotes);
+  state.notes = repaired.notes;
   state.deletedNotes = normalizeDeletedNotes(readJson(DELETED_KEY, {}));
   state.settings = normalizeSettings(readJson(SETTINGS_KEY, DEFAULT_SETTINGS));
   applyTombstones();
+  if (repaired.changed) writeJson(STORAGE_KEY, state.notes);
 }
 
 function applyTombstones() {
@@ -468,6 +540,7 @@ function upsertNote(event) {
   const title = els.title.value.trim();
   const body = els.body.value.trim();
   if (!title || !body) return;
+  const contentUpdatedAt = nowIso();
 
   const payload = {
     title,
@@ -475,7 +548,8 @@ function upsertNote(event) {
     source: els.source.value.trim(),
     tags: parseTags(els.tags.value),
     attachments: state.formAttachments.map(cloneAttachment),
-    updatedAt: nowIso()
+    updatedAt: contentUpdatedAt,
+    contentUpdatedAt
   };
 
   if (id) {
@@ -528,7 +602,6 @@ function markQuizReviewed(id) {
   const note = state.notes.find((item) => item.id === id);
   if (!note) return;
   note.lastQuizAt = nowIso();
-  note.updatedAt = nowIso();
   persistNotes();
   renderNotes();
 }
@@ -945,10 +1018,12 @@ function exportJson() {
 }
 
 function mergeRemotePayload(payload) {
-  const incomingNotes = Array.isArray(payload?.notes) ? payload.notes.map(normalizeNote).filter(Boolean) : [];
+  const incomingNormalized = Array.isArray(payload?.notes) ? payload.notes.map(normalizeNote).filter(Boolean) : [];
+  const incomingNotes = repairDuplicateNoteIds(incomingNormalized).notes;
   const incomingDeleted = normalizeDeletedNotes(payload?.deletedNotes || {});
-  const noteMap = new Map(state.notes.map((note) => [note.id, note]));
-  let changed = 0;
+  const localRepaired = repairDuplicateNoteIds(state.notes.map(normalizeNote).filter(Boolean));
+  const noteMap = new Map(localRepaired.notes.map((note) => [note.id, note]));
+  let changed = localRepaired.changed ? 1 : 0;
 
   Object.entries(incomingDeleted).forEach(([id, deletedAt]) => {
     if (dateValue(deletedAt) > dateValue(state.deletedNotes[id])) {
@@ -959,16 +1034,22 @@ function mergeRemotePayload(payload) {
 
   incomingNotes.forEach((note) => {
     const localDeletedAt = dateValue(state.deletedNotes[note.id]);
-    if (localDeletedAt >= dateValue(note.updatedAt)) return;
+    if (localDeletedAt >= contentTime(note)) return;
     const local = noteMap.get(note.id);
-    if (!local || dateValue(note.updatedAt) > dateValue(local.updatedAt)) {
+    if (!local || contentTime(note) > contentTime(local)) {
       noteMap.set(note.id, note);
+      changed += 1;
+      return;
+    }
+    const mergedQuizAt = latestIso(local.lastQuizAt, note.lastQuizAt);
+    if (mergedQuizAt !== local.lastQuizAt) {
+      local.lastQuizAt = mergedQuizAt;
       changed += 1;
     }
   });
 
-  state.notes = [...noteMap.values()].filter((note) => dateValue(state.deletedNotes[note.id]) < dateValue(note.updatedAt));
-  state.notes.sort((a, b) => dateValue(b.updatedAt) - dateValue(a.updatedAt));
+  state.notes = [...noteMap.values()].filter((note) => dateValue(state.deletedNotes[note.id]) < contentTime(note));
+  state.notes.sort((a, b) => contentTime(b) - contentTime(a));
   persistNotes({ sync: false });
   persistDeletedNotes({ sync: false });
   renderNotes();
